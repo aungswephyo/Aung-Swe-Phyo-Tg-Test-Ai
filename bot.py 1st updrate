@@ -6,13 +6,16 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 import openai
 import google.generativeai as genai
+
 import re
 
 from telegram.ext import ContextTypes
-
 from telegram import Update
 from telegram.constants import ParseMode
 from urllib.parse import quote
+
+import asyncio
+from telegram.constants import ChatAction
 
 # လော့ဂ်အား သတ်မှတ်ခြင်း
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -75,43 +78,47 @@ async def select_ai_model(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("ChatGPT ကို ရွေးချယ်ပြီးပါပြီ။ မေးခွန်းမေးနိုင်ပါပြီ။")
 
 # message handler
+async def send_typing_action(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    while True:
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        await asyncio.sleep(5)  # 5 စက္ကန့်တိုင်း typing action ကို ပြန်ပို့ပါမယ်
+
+import asyncio
+from telegram import Update
+from telegram.ext import ContextTypes
+from telegram.constants import ChatAction, ParseMode
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     current_date = datetime.now().date()
 
-    # နေ့သစ်တစ်ရက်အတွက် မက်ဆေ့ခ်အရေအတွက်အား ပြန်လည်သတ်မှတ်ခြင်း
     if user_id not in user_message_count or user_message_count[user_id]['date'] != current_date:
         user_message_count[user_id] = {'count': 0, 'date': current_date}
 
-    # အသုံးပြုသူသည် နေ့စဉ်ကန့်သတ်ချက်ကို ကျော်လွန်သွားခြင်း ရှိမရှိ စစ်ဆေးခြင်း
     if user_message_count[user_id]['count'] >= MAX_MESSAGES_PER_DAY:
         await update.message.reply_text("ယနေ့အတွက် အများဆုံး မက်ဆေ့ခ်အရေအတွက်သို့ ရောက်ရှိသွားပါပြီ။ နက်ဖြန်တွင် ထပ်မံကြိုးစားကြည့်ပါ။")
         return
 
-    # အသုံးပြုသူ input အရှည်ကို စစ်ဆေးခြင်း
     if len(update.message.text) > MAX_USER_INPUT_LENGTH:
         await update.message.reply_text(f"သင့်မက်ဆေ့ခ်သည် စာလုံး {MAX_USER_INPUT_LENGTH} ထက် ပိုရှည်နေပါသည်။ ကျေးဇူးပြု၍ တိုတောင်းသော မက်ဆေ့ခ်ကို ပေးပို့ပါ။")
         return
 
-    # မက်ဆေ့ခ်အရေအတွက်အား တိုးမြှင့်ခြင်း
     user_message_count[user_id]['count'] += 1
 
-    # စဉ်းစားနေကြောင်း ပြသခြင်း
     thinking_message = await update.message.reply_text("သင့်မေးခွန်းကို စဉ်းစားနေပါသည်...")
 
     ai_model = context.user_data.get('ai_model', 'chatgpt')
     user_message = update.message.text
 
-    # AI model နှင့် ချိတ်ဆက်၍ အဖြေရယူခြင်း
-    if ai_model == 'gemini':
-        try:
+    try:
+        # စာရိုက်နေကြောင်း ပြသခြင်း
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+        if ai_model == 'gemini':
             response = gemini_model.generate_content(user_message)
             reply_text = response.text
-        except Exception as e:
-            logger.error(f"Gemini AI error: {str(e)}")
-            reply_text = "ဝမ်းနည်းပါတယ်။ Gemini AI နှင့် ချိတ်ဆက်ရာတွင် ပြဿနာ ဖြစ်ပေါ်နေပါသည်။ ခဏလေး နောက်မှ ထပ်စမ်းကြည့်ပါ။"
-    else:  # ChatGPT
-        try:
+        else:  # ChatGPT
             response = openai.ChatCompletion.create(
                 model="gpt-3.5-turbo",
                 messages=[
@@ -120,43 +127,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 ]
             )
             reply_text = response.choices[0].message.content
-        except openai.error.RateLimitError:
-            reply_text = "ဝမ်းနည်းပါတယ်။ လက်ရှိအချိန်မှာ AI ဝန်ဆောင်မှုကို အသုံးပြုသူများနေပါတယ်။ ခဏလေး နောက်မှ ထပ်စမ်းကြည့်ပါ။"
-        except Exception as e:
-            logger.error(f"ChatGPT error: {str(e)}")
-            reply_text = "ဝမ်းနည်းပါတယ်။ AI နှင့် ချိတ်ဆက်ရာတွင် ပြဿနာ ဖြစ်ပေါ်နေပါသည်။ ခဏလေး နောက်မှ ထပ်စမ်းကြည့်ပါ။"
 
-    # Code blocks ကို သီးခြား format လုပ်ခြင်း
-    reply_text = re.sub(r'```(\w+)?\n(.*?)\n```', lambda m: f'```{m.group(1) or ""}\n{m.group(2)}\n```', reply_text, flags=re.DOTALL)
+        reply_text = re.sub(r'```(\w+)?\n(.*?)\n```', lambda m: f'```{m.group(1) or ""}\n{m.group(2)}\n```', reply_text, flags=re.DOTALL)
+        reply_text = reply_text[:MAX_RESPONSE_LENGTH]
 
-    # အကြောင်းပြန်မှုအရှည်ကို ကန့်သတ်ခြင်း
-    reply_text = reply_text[:MAX_RESPONSE_LENGTH]
+        remaining_messages = MAX_MESSAGES_PER_DAY - user_message_count[user_id]['count']
 
-    # ကျန်ရှိသော မက်ဆေ့ခ်အရေအတွက်ကို တွက်ချက်ခြင်း
-    remaining_messages = MAX_MESSAGES_PER_DAY - user_message_count[user_id]['count']
+        keyboard = [
+            [InlineKeyboardButton("📋 ကူးယူရန်", callback_data="copy"),
+             InlineKeyboardButton("🔗 မျှဝေရန်", callback_data="share")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # UI လှလှလေးနဲ့ copy နဲ့ share option တွေကို ထည့်သွင်းခြင်း
-    keyboard = [
-        [InlineKeyboardButton("📋 ကူးယူရန်", callback_data="copy"),
-         InlineKeyboardButton("🔗 မျှဝေရန်", callback_data="share")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+        formatted_reply = (
+            f"{reply_text}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🗨️ ကျန်ရှိသော မက်ဆေ့ခ်: {remaining_messages}"
+        )
 
-    formatted_reply = (
-        f"{reply_text}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🗨️ ကျန်ရှိသော မက်ဆေ့ခ်: {remaining_messages}"
-    )
+        await thinking_message.delete()
+        await update.message.reply_text(formatted_reply, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+        logger.info(f"အသုံးပြုသူ {user_id} သည် {ai_model} မှ တုံ့ပြန်မှုတစ်ခု ရရှိခဲ့သည်")
 
-    # စဉ်းစားနေကြောင်းပြသသည့် မက်ဆေ့ခ်ကို ဖျက်ပစ်ခြင်း
-    await thinking_message.delete()
+    except Exception as e:
+        await thinking_message.delete()
+        logger.error(f"Error: {str(e)}")
+        formatted_reply = "ဝမ်းနည်းပါတယ်။ AI နှင့် ချိတ်ဆက်ရာတွင် ပြဿနာ ဖြစ်ပေါ်နေပါသည်။ ခဏလေး နောက်မှ ထပ်စမ်းကြည့်ပါ။"
+        await update.message.reply_text(formatted_reply)
 
-    # Markdown ပုံစံဖြင့် ပြန်လည်တုံ့ပြန်ခြင်း
-    await update.message.reply_text(formatted_reply, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-    logger.info(f"အသုံးပြုသူ {user_id} သည် {ai_model} မှ တုံ့ပြန်မှုတစ်ခု ရရှိခဲ့သည်")
-
-    await update.message.reply_text(formatted_reply, reply_markup=reply_markup)
-    logger.info(f"အသုံးပြုသူ {user_id} သည် {ai_model} မှ တုံပြန်မှုတစ်ခု ရရှိခဲ့သည်")
+    finally:
+        # စာရိုက်နေကြောင်း ပြသခြင်းကို ရပ်တန့်ခြင်း
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
 # Copy လုပ်ဆောင်ချက်အတွက် callback function
 async def copy_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
